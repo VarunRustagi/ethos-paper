@@ -80,7 +80,7 @@ def infer(
         dataset_cls = MortalityDataset
     elif test == Test.SINGLE_ADMISSION:
         # todo: move the hardcoded values to options of the script
-        dataset_cls = partial(SingleAdmissionMortalityDataset, admission_idx=70885993, num_reps=35)
+        dataset_cls = partial(SingleAdmissionMortalityDataset, admission_idx=24540843, num_reps=35)
         stoi = [DISCHARGE_STOKEN] + stoi
     elif test == Test.SOFA_PREDICTION:
         dataset_cls = SofaPredictionDataset
