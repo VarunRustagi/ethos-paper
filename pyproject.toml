@@ -25,6 +25,7 @@ dependencies = [
     "torch",
     "joblib",
     "tqdm",
+    "psutil"
 ]
 
 [project.optional-dependencies]
