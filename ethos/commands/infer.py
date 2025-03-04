@@ -24,7 +24,7 @@ from ethos.datasets import (
     ICUMortalityDataset,
 )
 from ethos.datasets.mimic import DrgPredictionDataset, ICUReadmissionDataset
-from ethos.inference import Test, run_inference
+from ethos.inference import Test, run_inference, profile_inference
 from ethos.tokenize import SpecialToken, Vocabulary
 from ethos.utils import load_model_from_checkpoint, load_data, get_logger
 
@@ -51,6 +51,7 @@ logger = get_logger()
 @option("--output", default="results", help="Path where to save results.")
 @option("--model_name", default=None, help="Name of the model, used for the output directory.")
 @option("--no_time_offset", is_flag=True, help="Don't do 24h-time-offset for ICU mortality.")
+@option("--mode", default="infer", type=Choice(["infer", "profile"]), help="Mode of the script - choose between inference and profiling.")
 def infer(
     test: str,
     model: str,
@@ -65,6 +66,7 @@ def infer(
     output: str,
     model_name: Optional[str],
     no_time_offset: bool,
+    mode: str,
 ):
     vocab = Vocabulary(PROJECT_DATA / vocab)
 
@@ -134,5 +136,8 @@ def infer(
         for i, subset in enumerate(subsets)
     ]
     set_start_method("spawn")
-    Parallel(n_jobs=n_jobs)(delayed(run_inference)(loader, data, n_gpus) for loader in loaders)
+    if(mode == "infer"):
+        Parallel(n_jobs=n_jobs)(delayed(run_inference)(loader, data, n_gpus) for loader in loaders)
+    else:
+        Parallel(n_jobs=n_jobs)(delayed(profile_inference)(loader, data, n_gpus) for loader in loaders)
     logger.info(f"Done, results saved to '{results_dir}'")
