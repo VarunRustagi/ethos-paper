@@ -3,6 +3,7 @@ import multiprocessing as mp
 import time
 import psutil
 import numpy as np
+import os
 
 import torch as th
 from tqdm import tqdm
@@ -142,7 +143,7 @@ def profile_inference(loader, args, num_gpus: int = 8, save_timeline: bool = Tru
 
     print("\n🔍 **Profiling Inference in Real-Time...**\n")
 
-        # Measure data loading speed
+    # Measure data loading speed
     start_io_time = time.time()
     data_size = sum(os.path.getsize(f) for f in dataset.files) / (1024 * 1024)  # MB
     end_io_time = time.time()
