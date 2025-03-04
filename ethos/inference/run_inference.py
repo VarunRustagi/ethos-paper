@@ -143,15 +143,6 @@ def profile_inference(loader, args, num_gpus: int = 8, save_timeline: bool = Tru
 
     print("\n🔍 **Profiling Inference in Real-Time...**\n")
 
-    # Measure data loading speed
-    start_io_time = time.time()
-    data_size = sum(os.path.getsize(f) for f in dataset.files) / (1024 * 1024)  # MB
-    end_io_time = time.time()
-    io_time = end_io_time - start_io_time
-    io_speed = data_size / io_time if io_time > 0 else 0
-
-    print(f"📂 **Data Loading Speed:** {io_speed:.2f} MB/sec ({data_size:.2f} MB loaded in {io_time:.2f} sec)")
-
     overall_start_time = time.time()  # Start timing full inference
 
     for timeline, _ in tqdm(loader, desc="Profiling", total=len(loader), position=proc_num):
