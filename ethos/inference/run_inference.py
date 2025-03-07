@@ -145,8 +145,18 @@ def profile_inference(loader, args, num_gpus: int = 8, save_timeline: bool = Tru
 
     overall_start_time = time.time()  # Start timing full inference
 
+    total_input_tokens = sum(len(timeline) for timeline, _ in loader)  # Count input tokens
+    print(f"\n📊 **Total Input Tokens in Dataset:** {total_input_tokens:,}\n")
     for timeline, _ in tqdm(loader, desc="Profiling", total=len(loader), position=proc_num):
         timeline = timeline.to(device)
+        
+        # Enforce 1000-token input limit
+        if len(timeline) > 1000:
+            timeline = timeline[:1000]  # Truncate
+        else:
+            padding = th.zeros(1000 - len(timeline), dtype=timeline.dtype, device=device)
+            timeline = th.cat((timeline, padding))  # Pad
+
         gen_token_num = 0
         offset = 0
         
@@ -177,8 +187,6 @@ def profile_inference(loader, args, num_gpus: int = 8, save_timeline: bool = Tru
             print(f"   - Requests per Second: {requests_per_sec:.2f} req/sec")
             print(f"   - Current Throughput: {current_throughput:.2f} tokens/sec")
             print(f"   - CPU Utilization: {cpu_utilization}%")
-            print(f"   - Model Parameters: {num_params:,} ({param_size_mb:.2f} MB)")
-            print(f"   - Estimated FLOPs: {flops:,}")
 
             if not offset and len(timeline) == max_timeline_size:
                 offset = 1
@@ -206,6 +214,9 @@ def profile_inference(loader, args, num_gpus: int = 8, save_timeline: bool = Tru
     print(f"- 🚀 Effective Throughput: {effective_throughput:.2f} tokens/sec")
     print(f"- 🕒 Average Latency (get_next_token): {total_model_time / total_tokens:.4f} sec/token")
     print(f"- 🏗️ Parameter Size: {param_size_mb:.2f} MB")
+    print(f"- 📊 **Total Input Tokens Processed:** {total_input_tokens:,}")
+    print(f"- 🚀 **Tokens Per Inference (Limited to 1000):** {1000}")
+    
     
     # Print the first 20 tokens of the generated timeline
     print("\n📝 **Generated Timeline (First 20 Tokens):**")
