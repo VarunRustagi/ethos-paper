@@ -58,6 +58,8 @@ def tokenize_(
     The name is weird due to the Click issue: https://github.com/pallets/click/issues/2615
     """
     dataset_prop = DataProp.create(dataset, fold)
+
+    print("Dataset Prop", dataset_prop)
     if nrows is None:
         # use parquet files for the entire dataset as it's way faster
         kwargs = dict(use_parquet=True)

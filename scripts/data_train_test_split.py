@@ -29,12 +29,20 @@ def dump_splits(
     else:
         df = pd.read_csv(orig_path, low_memory=False)
 
+
+    print("dataframe", df)
+
+
     id_col = None if subject_id_split is None else col[0]
     date_col = None if cutoff_date is None else col[-1]
+
+    print("id_col", id_col)
+    print("date_col", date_col)
 
     if date_col is not None:
         df[date_col] = pd.to_datetime(df[date_col])
 
+    print("df", df)
     for split_path in split_paths:
         _df = df.copy()
         processed = False
@@ -89,6 +97,8 @@ def data_train_test_split(
 
     if cutoff_date is not None:
         cutoff_date = pd.Timestamp(cutoff_date)
+
+        print("Cutoff date", cutoff_date)
 
         if id_data_path is None:
             logger.info(

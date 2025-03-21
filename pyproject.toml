@@ -29,7 +29,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-all = ["jupyter", "seaborn", "pytest", "wandb", "scikit-learn", "python-dotenv"]
+all = ["jupyter", "seaborn", "pytest", "wandb", "scikit-learn", "python-dotenv", "fastapi", "uvicorn", "locust"]
 
 [project.scripts]
 ethos = "ethos.cli:run_cli"
