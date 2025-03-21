@@ -88,7 +88,7 @@ def setup_torch(device, dtype, seed=42):
 
 
 def load_model_from_checkpoint(path, device, for_training=True, **kwargs):
-    checkpoint = th.load(path, map_location=device)
+    checkpoint = th.load(path, map_location=device, weights_only=False)
     gptconf = ModelConfig(**checkpoint["model_args"])
     model = Ethos(gptconf, **kwargs)
     state_dict = checkpoint["model"]

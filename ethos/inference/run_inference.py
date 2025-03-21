@@ -1,9 +1,13 @@
+from asyncio.log import logger
 import json
 import multiprocessing as mp
+import re
 import time
+import traceback
 import psutil
 import numpy as np
 import os
+from fastapi.responses import JSONResponse
 
 import torch as th
 from tqdm import tqdm
@@ -13,7 +17,12 @@ from .constants import Test
 
 def get_process_info():
     proc_name = mp.current_process().name
-    proc_num = 1 if proc_name == "MainProcess" else int(proc_name.split("-")[-1]) - 1
+    print(f"Process name: {proc_name}")
+    
+    # Extract the last number (handles cases like 'LokyProcess-8:7')
+    match = re.search(r"(\d+)$", proc_name)  
+    proc_num = int(match.group(1)) if match else 1  
+
     return proc_name, proc_num
 
 
@@ -106,18 +115,21 @@ def run_inference(loader, args, num_gpus: int = 8):
         )
 
     res_file = results_dir / f"part_{proc_num}{f'_{suffix}' if suffix is not None else ''}"
+    
     with res_file.with_suffix(".json").open("w") as f:
         json.dump(results, f, indent=4)
 
     th.cuda.empty_cache()
+    return JSONResponse(content=results)
 
 def profile_inference(loader, args, num_gpus: int = 8, save_timeline: bool = True):
     model, device, vocab, stoi, results_dir, test_name, suffix, no_compile = args
 
+    print("\n🚀 **Starting Profiling...**")
     proc_name, proc_num = get_process_info()
-    if device == "cuda":
-        device = f"cuda:{proc_num % num_gpus}"
-        th.cuda.set_device(device)
+    # if device == "cuda":
+    #     device = f"cuda:{proc_num % num_gpus}"
+    #     th.cuda.set_device(device)
     model.to(device)
     
     if not no_compile:
@@ -141,69 +153,74 @@ def profile_inference(loader, args, num_gpus: int = 8, save_timeline: bool = Tru
 
     timeline_output = []
 
-    print("\n🔍 **Profiling Inference in Real-Time...**\n")
-
     overall_start_time = time.time()  # Start timing full inference
 
     total_input_tokens = sum(len(timeline) for timeline, _ in loader)  # Count input tokens
     print(f"\n📊 **Total Input Tokens in Dataset:** {total_input_tokens:,}\n")
-    for timeline, _ in tqdm(loader, desc="Profiling", total=len(loader), position=proc_num):
-        timeline = timeline.to(device)
-        
-        # Enforce 1000-token input limit
-        if len(timeline) > 1000:
-            timeline = timeline[:1000]  # Truncate
-        else:
-            padding = th.zeros(1000 - len(timeline), dtype=timeline.dtype, device=device)
-            timeline = th.cat((timeline, padding))  # Pad
-
-        gen_token_num = 0
-        offset = 0
-        
-        while True:
-            start_time = time.time()
-            model_start_time = time.time()
+    try:
+        for timeline, _ in tqdm(loader, desc="Profiling", total=len(loader), position=proc_num):
+            timeline = timeline.to(device)
             
-            last_token, probs = model.get_next_token(timeline[None, ...], return_probs=True)
+            # Enforce 1000-token input limit
+            if len(timeline) > 1000:
+                timeline = timeline[:1000]  # Truncate
+            else:
+                padding = th.zeros(1000 - len(timeline), dtype=timeline.dtype, device=device)
+                timeline = th.cat((timeline, padding))  # Pad
 
-            model_time = time.time() - model_start_time
-            elapsed_time = time.time() - start_time
-            total_model_time += model_time
-            total_time += elapsed_time
-            total_calls += 1
-            total_tokens += 1
-            avg_inference_time = total_time / total_tokens
-            requests_per_sec = total_calls / total_time if total_time > 0 else 0
-            current_throughput = 1 / elapsed_time if elapsed_time > 0 else 0
-            cpu_utilization = psutil.cpu_percent(interval=0.1)
+            gen_token_num = 0
+            offset = 0
+            
+            while True:
+                start_time = time.time()
+                model_start_time = time.time()
+                
+                last_token, probs = model.get_next_token(timeline[None, ...], return_probs=True)
 
-            timeline_output.append(vocab.decode(last_token.item()))
+                model_time = time.time() - model_start_time
+                elapsed_time = time.time() - start_time
+                total_model_time += model_time
+                total_time += elapsed_time
+                total_calls += 1
+                total_tokens += 1
+                avg_inference_time = total_time / total_tokens
+                requests_per_sec = total_calls / total_time if total_time > 0 else 0
+                current_throughput = 1 / elapsed_time if elapsed_time > 0 else 0
+                cpu_utilization = psutil.cpu_percent(interval=0.1)
+
+                timeline_output.append(vocab.decode(last_token.item()))
 
 
-            print(f"\n🟢 Token {total_tokens}: '{vocab.decode(last_token.item())}'")
-            print(f"   - Time per token: {elapsed_time:.4f} sec")
-            print(f"   - Model Execution Time: {model_time:.4f} sec")
-            print(f"   - Avg Time per Inference: {avg_inference_time:.4f} sec")
-            print(f"   - Requests per Second: {requests_per_sec:.2f} req/sec")
-            print(f"   - Current Throughput: {current_throughput:.2f} tokens/sec")
-            print(f"   - CPU Utilization: {cpu_utilization}%")
+                print(f"\n🟢 Token {total_tokens}: '{vocab.decode(last_token.item())}'")
+                print(f"   - Time per token: {elapsed_time:.4f} sec")
+                print(f"   - Model Execution Time: {model_time:.4f} sec")
+                print(f"   - Avg Time per Inference: {avg_inference_time:.4f} sec")
+                print(f"   - Requests per Second: {requests_per_sec:.2f} req/sec")
+                print(f"   - Current Throughput: {current_throughput:.2f} tokens/sec")
+                print(f"   - CPU Utilization: {cpu_utilization}%")
 
-            if not offset and len(timeline) == max_timeline_size:
-                offset = 1
 
-            timeline = th.cat((timeline[:context_len], timeline[context_len + offset :], last_token.view(-1)),)
-            gen_token_num += 1
+                if not offset and len(timeline) == max_timeline_size:
+                    offset = 1
 
-            # Stop criterion
-            if timeline[-1] in toi:
-                break
-            elif test_name == Test.READMISSION or gen_token_num > timeline_len:
-                timeline_time = vocab.get_timeline_total_time(
-                    timeline[-gen_token_num:].cpu(), decode=True
-                )
-                if timeline_time > time_limit:
+                timeline = th.cat((timeline[:context_len], timeline[context_len + offset :], last_token.view(-1)),)
+                gen_token_num += 1
+
+
+                # Stop criterion
+                if timeline[-1] in toi:
                     break
+                elif test_name == Test.READMISSION or gen_token_num > timeline_len:
+                    timeline_time = vocab.get_timeline_total_time(
+                        timeline[-gen_token_num:].cpu(), decode=True
+                    )
+                    if timeline_time > time_limit:
+                        break
+    except Exception as e:
+        logger.error(f"Inference error: {traceback.format_exc()}")
 
+    token_array_size = len(timeline)
+    print(f"Output Tokens Array Size: {token_array_size}")
     overall_end_time = time.time()
     full_inference_time = overall_end_time - overall_start_time
     effective_throughput = total_tokens / full_inference_time if full_inference_time > 0 else 0
@@ -221,6 +238,17 @@ def profile_inference(loader, args, num_gpus: int = 8, save_timeline: bool = Tru
     # Print the first 20 tokens of the generated timeline
     print("\n📝 **Generated Timeline (First 20 Tokens):**")
     print(" ".join(timeline_output[:20]))
+      # Final Results Dictionary
+    results = {
+        "total_tokens": total_tokens,
+        "total_inference_time": round(full_inference_time, 2),
+        "effective_throughput": round(effective_throughput, 2),
+        "average_latency": round(total_model_time / total_tokens, 4) if total_tokens > 0 else 0,
+        "parameter_size_mb": round(param_size_mb, 2),
+        "total_input_tokens": total_input_tokens,
+        "tokens_per_inference": 1000,
+        "generated_timeline": timeline_output[:20],  # First 20 tokens only
+    }
 
     # Save the full timeline if requested
     if save_timeline:
@@ -230,3 +258,4 @@ def profile_inference(loader, args, num_gpus: int = 8, save_timeline: bool = Tru
 
     th.cuda.empty_cache()
     print("\n✅ **Profiling Completed!**\n")
+    return JSONResponse(content=results)
