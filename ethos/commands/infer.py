@@ -24,7 +24,7 @@ from ethos.datasets import (
     ICUMortalityDataset,
 )
 from ethos.datasets.mimic import DrgPredictionDataset, ICUReadmissionDataset
-from ethos.inference import Test, run_inference, profile_inference
+from ethos.inference import Test, run_inference, profile_inference, model_weights
 from ethos.tokenize import SpecialToken, Vocabulary
 from ethos.utils import load_model_from_checkpoint, load_data, get_logger
 
@@ -51,7 +51,8 @@ logger = get_logger()
 @option("--output", default="results", help="Path where to save results.")
 @option("--model_name", default=None, help="Name of the model, used for the output directory.")
 @option("--no_time_offset", is_flag=True, help="Don't do 24h-time-offset for ICU mortality.")
-@option("--mode", default="infer", type=Choice(["infer", "profile"]), help="Mode of the script - choose between inference and profiling.")
+@option("--mode", default="infer", type=Choice(["infer", "profile", "model_weights"]), help="Mode of the script - choose between inference, profiling or model weights.")
+@option("--save_weights", is_flag=True, help="Save detailed weight statistics to file.")
 def infer(
     test: str,
     model: str,
@@ -138,6 +139,9 @@ def infer(
     set_start_method("spawn")
     if(mode == "infer"):
         Parallel(n_jobs=n_jobs)(delayed(run_inference)(loader, data, n_gpus) for loader in loaders)
-    else:
+    elif(mode == "profile"):
         Parallel(n_jobs=n_jobs)(delayed(profile_inference)(loader, data, n_gpus) for loader in loaders)
+    elif(mode == "model_weights"):
+        Parallel(n_jobs=n_jobs)(delayed(model_weights)(loader, data, n_gpus) for loader in loaders)
     logger.info(f"Done, results saved to '{results_dir}'")
+
