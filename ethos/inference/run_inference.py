@@ -259,3 +259,114 @@ def profile_inference(loader, args, num_gpus: int = 8, save_timeline: bool = Tru
     th.cuda.empty_cache()
     print("\n✅ **Profiling Completed!**\n")
     return JSONResponse(content=results)
+
+def model_weights(loader, args, num_gpus: int = 8, save_weights: bool = False):
+    """Analyze and profile model weights during inference.
+    
+    Args:
+        loader: Data loader containing timelines and ground truth
+        args: Tuple containing (model, device, vocab, stoi, results_dir, test_name, suffix, no_compile)
+        num_gpus: Number of available GPUs
+        save_weights: Whether to save weight statistics to file
+    """
+    model, device, vocab, stoi, results_dir, test_name, suffix, no_compile = args
+
+    print("\n🔍 **Starting Model Weights Analysis...**")
+    proc_name, proc_num = get_process_info()
+    model.to(device)
+    
+    if not no_compile:
+        model = th.compile(model)
+
+    # Get model architecture information
+    print("\n📐 **Model Architecture:**")
+    print(model)
+    print(f"\n⚙️  Device: {device}")
+
+    # Calculate total parameters
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    
+    print(f"\n🧮 **Parameter Count:**")
+    print(f"- Total parameters: {total_params:,}")
+    print(f"- Trainable parameters: {trainable_params:,}")
+    print(f"- Non-trainable parameters: {total_params - trainable_params:,}")
+
+    # Initialize weight statistics storage
+    weight_stats = {
+        'layer_stats': {},
+        'total_params': total_params,
+        'trainable_params': trainable_params
+    }
+
+    # Analyze each layer's weights
+    print("\n📊 **Layer-wise Weight Analysis:**")
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            layer_stats = {
+                'shape': list(param.shape),
+                'mean': th.mean(param.data).item(),
+                'std': th.std(param.data).item(),
+                'min': th.min(param.data).item(),
+                'max': th.max(param.data).item(),
+                'numel': param.numel(),
+                'dtype': str(param.dtype)
+            }
+            
+            weight_stats['layer_stats'][name] = layer_stats
+
+            # Print layer statistics
+            print(f"\n🔹 Layer: {name}")
+            print(f"   - Shape: {layer_stats['shape']}")
+            print(f"   - Parameters: {layer_stats['numel']:,}")
+            print(f"   - Mean: {layer_stats['mean']:.6f}")
+            print(f"   - Std: {layer_stats['std']:.6f}")
+            print(f"   - Range: [{layer_stats['min']:.6f}, {layer_stats['max']:.6f}]")
+            print(f"   - Dtype: {layer_stats['dtype']}")
+
+    # Calculate memory usage
+    param_size = total_params * 4 / (1024 ** 2)  # MB assuming float32
+    print(f"\n💾 **Memory Usage:**")
+    print(f"- Estimated size: {param_size:.2f} MB (float32)")
+
+    # Run a sample inference to observe weight behavior
+    print("\n🚀 **Running Sample Inference to Observe Weight Behavior...**")
+    try:
+        sample_timeline, _ = next(iter(loader))
+        sample_timeline = sample_timeline.to(device)
+        
+        # Before inference
+        print("\n🔄 **Weight Gradients Before Forward Pass:**")
+        for name, param in model.named_parameters():
+            if param.grad is not None:
+                print(f"{name}: grad exists (norm: {th.norm(param.grad):.4f})")
+            else:
+                print(f"{name}: no gradient")
+
+        # Forward pass
+        with th.no_grad():
+            last_token, probs = model.get_next_token(sample_timeline[None, ...], return_probs=True)
+        
+        # After inference (no backward pass in inference mode)
+        print("\n🔄 **Weight Gradients After Forward Pass (Inference Mode):**")
+        for name, param in model.named_parameters():
+            if param.grad is not None:
+                print(f"{name}: grad exists (norm: {th.norm(param.grad):.4f})")
+            else:
+                print(f"{name}: no gradient (inference only)")
+
+        print(f"\n✅ Sample inference completed. Generated token: '{vocab.decode(last_token.item())}'")
+
+    except Exception as e:
+        logger.error(f"Sample inference error: {traceback.format_exc()}")
+
+    # Save weight statistics if requested
+    if save_weights:
+        weights_file = results_dir / f"weight_stats_{proc_num}.json"
+        with weights_file.open("w") as f:
+            json.dump(weight_stats, f, indent=4)
+        print(f"\n💾 Saved weight statistics to {weights_file}")
+
+    th.cuda.empty_cache()
+    print("\n✅ **Model Weights Analysis Completed!**\n")
+    return JSONResponse(content=weight_stats)
