@@ -360,12 +360,11 @@ def model_weights(loader, args, num_gpus: int = 8, save_weights: bool = False):
     except Exception as e:
         logger.error(f"Sample inference error: {traceback.format_exc()}")
 
-    # Save weight statistics if requested
-    if save_weights:
-        weights_file = results_dir / f"weight_stats_{proc_num}.json"
-        with weights_file.open("w") as f:
-            json.dump(weight_stats, f, indent=4)
-        print(f"\n💾 Saved weight statistics to {weights_file}")
+    # Save weight statistics to file
+    weights_file = results_dir / f"weight_stats_{proc_num}.json"
+    with weights_file.open("w") as f:
+        json.dump(weight_stats, f, indent=4)
+    print(f"\n💾 Saved weight statistics to {weights_file}")
 
     th.cuda.empty_cache()
     print("\n✅ **Model Weights Analysis Completed!**\n")

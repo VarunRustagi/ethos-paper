@@ -52,7 +52,6 @@ logger = get_logger()
 @option("--model_name", default=None, help="Name of the model, used for the output directory.")
 @option("--no_time_offset", is_flag=True, help="Don't do 24h-time-offset for ICU mortality.")
 @option("--mode", default="infer", type=Choice(["infer", "profile", "model_weights"]), help="Mode of the script - choose between inference, profiling or model weights.")
-@option("--save_weights", is_flag=True, help="Save detailed weight statistics to file.")
 def infer(
     test: str,
     model: str,
