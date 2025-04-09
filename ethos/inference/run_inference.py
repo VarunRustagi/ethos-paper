@@ -260,7 +260,7 @@ def profile_inference(loader, args, num_gpus: int = 8, save_timeline: bool = Tru
     print("\n✅ **Profiling Completed!**\n")
     return JSONResponse(content=results)
 
-def model_weights(loader, args, num_gpus: int = 8, save_weights: bool = False):
+def model_weights(loader, args, num_gpus: int = 8):
     """Analyze and profile model weights during inference.
     
     Args:
