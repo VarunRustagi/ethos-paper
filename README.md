@@ -1,5 +1,10 @@
 # ETHOS: Enhanced Transformer for Health Outcome Simulation
 
+> [!IMPORTANT]
+> This repository is deprecated. The new improved version of ETHOS running
+> on [MEDS](https://github.com/Medical-Event-Data-Standard/meds) is
+> available in [this repo](https://github.com/ipolharvard/ethos-ares).
+
 [ETHOS](https://www.nature.com/articles/s41746-024-01235-0) is a novel application of the
 transformer deep-learning architecture, originally conceptualized for natural language processing.
 This architecture, a cornerstone in large language model development, is repurposed in ETHOS to
@@ -12,6 +17,16 @@ events - to predict future health timelines.
   <img src="./figures/mimic_figure1_paper.png" width="70%" alt="project pipeline scheme">
 </a>
 </p>
+
+> [!Note]
+> In this implementation of ETHOS, the ICD-CM codes were added at the time of inpatient admissions.
+> We acknowledge that this might introduce an information leak, as not all diagnoses are known at
+> that point.
+> To assess the impact, we conducted comprehensive tests to determine whether our results were
+> overstated.
+> Our analysis concluded that this issue affected only the SOFA score prediction.
+> In the paper, we reported $R^2$: 0.648 [0.631, 0.663], while after the correction, it is:
+> 0.598 [0.583, 0.604].
 
 ### Installation
 
