@@ -262,45 +262,42 @@ def profile_inference(loader, args, num_gpus: int = 8, save_timeline: bool = Tru
 
 def model_weights(loader, args, num_gpus: int = 8):
     """Analyze and profile model weights during inference.
-    
+
     Args:
         loader: Data loader containing timelines and ground truth
         args: Tuple containing (model, device, vocab, stoi, results_dir, test_name, suffix, no_compile)
         num_gpus: Number of available GPUs
-        save_weights: Whether to save weight statistics to file
     """
     model, device, vocab, stoi, results_dir, test_name, suffix, no_compile = args
 
     print("\n🔍 **Starting Model Weights Analysis...**")
     proc_name, proc_num = get_process_info()
     model.to(device)
-    
+
     if not no_compile:
         model = th.compile(model)
 
-    # Get model architecture information
-    print("\n📐 **Model Architecture:**")
+    # Model architecture and parameter stats
+    print("\n **Model Architecture:**")
     print(model)
     print(f"\n⚙️  Device: {device}")
 
-    # Calculate total parameters
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    
-    print(f"\n🧮 **Parameter Count:**")
+
+    print(f"\n **Parameter Count:**")
     print(f"- Total parameters: {total_params:,}")
     print(f"- Trainable parameters: {trainable_params:,}")
     print(f"- Non-trainable parameters: {total_params - trainable_params:,}")
 
-    # Initialize weight statistics storage
+    # Weight statistics
     weight_stats = {
         'layer_stats': {},
         'total_params': total_params,
         'trainable_params': trainable_params
     }
 
-    # Analyze each layer's weights
-    print("\n📊 **Layer-wise Weight Analysis:**")
+    print("\n **Layer-wise Weight Analysis:**")
     for name, param in model.named_parameters():
         if param.requires_grad:
             layer_stats = {
@@ -312,10 +309,9 @@ def model_weights(loader, args, num_gpus: int = 8):
                 'numel': param.numel(),
                 'dtype': str(param.dtype)
             }
-            
+
             weight_stats['layer_stats'][name] = layer_stats
 
-            # Print layer statistics
             print(f"\n🔹 Layer: {name}")
             print(f"   - Shape: {layer_stats['shape']}")
             print(f"   - Parameters: {layer_stats['numel']:,}")
@@ -324,47 +320,70 @@ def model_weights(loader, args, num_gpus: int = 8):
             print(f"   - Range: [{layer_stats['min']:.6f}, {layer_stats['max']:.6f}]")
             print(f"   - Dtype: {layer_stats['dtype']}")
 
-    # Calculate memory usage
-    param_size = total_params * 4 / (1024 ** 2)  # MB assuming float32
-    print(f"\n💾 **Memory Usage:**")
+    param_size = total_params * 4 / (1024 ** 2)
+    print(f"\n **Memory Usage:**")
     print(f"- Estimated size: {param_size:.2f} MB (float32)")
 
-    # Run a sample inference to observe weight behavior
-    print("\n🚀 **Running Sample Inference to Observe Weight Behavior...**")
+    print("\n **Running Sample Inference to Observe Weight Behavior...**")
     try:
         sample_timeline, _ = next(iter(loader))
         sample_timeline = sample_timeline.to(device)
-        
-        # Before inference
-        print("\n🔄 **Weight Gradients Before Forward Pass:**")
+        input_token_ids = sample_timeline.tolist()
+        input_tokens = vocab.decode(sample_timeline)
+
+        print("\n **Full Input Token Timeline:**")
+        print(f"- Token IDs: {input_token_ids}")
+        print(f"- Decoded Input Tokens:\n{input_tokens}")
+
+        print("\n **Weight Gradients Before Forward Pass:**")
         for name, param in model.named_parameters():
             if param.grad is not None:
                 print(f"{name}: grad exists (norm: {th.norm(param.grad):.4f})")
             else:
                 print(f"{name}: no gradient")
 
-        # Forward pass
         with th.no_grad():
             last_token, probs = model.get_next_token(sample_timeline[None, ...], return_probs=True)
-        
-        # After inference (no backward pass in inference mode)
-        print("\n🔄 **Weight Gradients After Forward Pass (Inference Mode):**")
+
+        print("\n🧮 **Weight Gradients After Forward Pass (Inference Mode):**")
         for name, param in model.named_parameters():
             if param.grad is not None:
                 print(f"{name}: grad exists (norm: {th.norm(param.grad):.4f})")
             else:
                 print(f"{name}: no gradient (inference only)")
 
-        print(f"\n✅ Sample inference completed. Generated token: '{vocab.decode(last_token.item())}'")
+        generated_token_id = last_token.item()
+        generated_token = vocab.decode(generated_token_id)
+        new_token_ids = input_token_ids + [generated_token_id]
+        new_decoded = vocab.decode(th.tensor(new_token_ids).to(device))
+
+        print(f"\n🟢 **Generated Token:**")
+        print(f"   - ID: {generated_token_id}")
+        print(f"   - Token: '{generated_token}'")
+
+        print(f"\n📈 **Updated Token Timeline:**")
+        print(f"- New Token IDs: {new_token_ids}")
+        print(f"- New Decoded Tokens:\n{new_decoded}")
+
+        # Top-k prediction details
+        topk = 5
+        top_probs, top_indices = th.topk(probs[0, -1], k=topk)
+        print(f"\n🔢 **Top {topk} Predicted Tokens:**")
+        for i in range(topk):
+            tok_id = top_indices[i].item()
+            tok_prob = top_probs[i].item()
+            tok_str = vocab.decode(tok_id)
+            print(f"  {i+1}. Token: '{tok_str}' (ID: {tok_id}, Prob: {tok_prob:.4f})")
+
+        print(f"\n📐 Output Shape: {list(probs.shape)}")
 
     except Exception as e:
         logger.error(f"Sample inference error: {traceback.format_exc()}")
 
-    # Save weight statistics to file
     weights_file = results_dir / f"weight_stats_{proc_num}.json"
     with weights_file.open("w") as f:
         json.dump(weight_stats, f, indent=4)
-    print(f"\n💾 Saved weight statistics to {weights_file}")
+    print(f"\n✅ Saved weight statistics to {weights_file}")
 
     th.cuda.empty_cache()
     print("\n✅ **Model Weights Analysis Completed!**\n")
