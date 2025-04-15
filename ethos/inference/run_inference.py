@@ -269,9 +269,12 @@ def model_weights(loader, args, num_gpus: int = 8, save_timeline: bool = True):
 
     # Define the hook to capture attention
     def hook_fn(module, input, output):
+        print(f"🧲 Hook triggered on {module.__class__.__name__}")
         if isinstance(output, tuple) and len(output) > 1:
-            attn_weights = output[1]  # (batch, num_heads, q_len, k_len)
-            attention_weights_log.append(attn_weights.detach().cpu())
+            attn_weights = output[1]
+            print(f"   ↪️ Attention shape: {attn_weights.shape}")
+            if attn_weights is not None:
+                attention_weights_log.append(attn_weights.detach().cpu())
 
     # Register hooks
     hooks = []
@@ -302,7 +305,11 @@ def model_weights(loader, args, num_gpus: int = 8, save_timeline: bool = True):
                     output = model.get_next_token(timeline.unsqueeze(0))
                     token_id = output[0].item() if isinstance(output, tuple) else output.item()
 
-                attn_tensor = attention_weights_log[-1] if attention_weights_log else None
+                attn_tensor = attention_weights_log[-1] 
+                if attention_weights_log:
+                    print(f"📏 Logged attention tensors: {len(attention_weights_log)}")
+                else:
+                    None
 
                 if attn_tensor is not None:
                     # attn_tensor shape: (batch=1, num_heads, query_len, key_len)
