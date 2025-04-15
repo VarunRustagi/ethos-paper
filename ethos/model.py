@@ -111,6 +111,7 @@ class Block(nn.Module):
         self.mlp = MLP(config)
 
     def forward(self, x):
+        attn_output, attn_weights = self.attn(self.ln_1(x))
         x = x + self.attn(self.ln_1(x))
         x = x + self.mlp(self.ln_2(x))
         return x
@@ -207,7 +208,7 @@ class Ethos(nn.Module):
         for block in self.transformer.h:
             x, attn = block(x)
             attentions.append(attn)
-            
+
         x = self.transformer.ln_f(x)
 
         if targets is not None:
