@@ -270,27 +270,29 @@ def model_weights(loader, args, num_gpus: int = 8, save_timeline: bool = True):
     if hasattr(model, 'return_attention'):
         original_setting = model.return_attention
         model.return_attention = True
-        print("✅ Enabled built-in attention tracking (return_attention=True)")
+        # Initialize attention_weights if it doesn't exist
+        if not hasattr(model, 'attention_weights'):
+            model.attention_weights = []
+        print("✅ Enabled built-in attention tracking")
     else:
-        raise RuntimeError("Model does not support return_attention - cannot capture attention weights.")
+        raise RuntimeError("Model does not support return_attention")
 
     try:
         for timeline, _ in tqdm(loader, desc="Extracting Attention"):
             timeline = timeline.to(device)
 
-            # Clear previous attention weights
-            if hasattr(model, 'attention_weights'):
+            # Safely clear attention weights
+            if hasattr(model, 'attention_weights') and model.attention_weights is not None:
                 model.attention_weights.clear()
 
             # Truncate or pad timeline
             if len(timeline) > 1000:
                 timeline = timeline[:1000]
-                print("⚠️ Timeline truncated to 1000 tokens.")
+                print("⚠️ Timeline truncated to 1000 tokens")
             else:
                 pad = th.zeros(1000 - len(timeline), dtype=timeline.dtype, device=device)
                 timeline = th.cat((timeline, pad))
 
-            # Process timeline for attention extraction
             while True:
                 print(f"\n🚀 Step {current_step}")
                 print("-" * 50)
@@ -299,60 +301,66 @@ def model_weights(loader, args, num_gpus: int = 8, save_timeline: bool = True):
                     output = model.get_next_token(timeline.unsqueeze(0))
                     token_id = output[0].item() if isinstance(output, tuple) else output.item()
 
-                # Extract attention from built-in storage
+                # Safely extract attention
                 if hasattr(model, 'attention_weights') and model.attention_weights:
-                    # Last layer's attention (assuming batch=1)
-                    attn_weights = model.attention_weights[-1][0]  # Shape: [num_heads, q_len, k_len]
-                    
-                    # Get attention for the newly generated token (last query position)
-                    last_q_pos = attn_weights.shape[1] - 1
-                    last_token_attn = attn_weights[:, last_q_pos, :]  # [num_heads, k_len]
-                    
-                    # Average across heads
-                    avg_attn = last_token_attn.mean(dim=0)  # [k_len]
-                    
-                    # Store for analysis
-                    all_attention_data.append({
-                        "step": current_step,
-                        "token_id": token_id,
-                        "attention": avg_attn.cpu().tolist()
-                    })
+                    try:
+                        attn_weights = model.attention_weights[-1][0]  # [num_heads, q_len, k_len]
+                        last_q_pos = attn_weights.shape[1] - 1
+                        last_token_attn = attn_weights[:, last_q_pos, :].mean(dim=0)  # [k_len]
+                        
+                        # Convert to serializable format
+                        attn_data = {
+                            "step": current_step,
+                            "token_id": int(token_id),  # Ensure JSON-serializable
+                            "attention": last_token_attn.cpu().tolist()  # Convert tensor to list
+                        }
+                        all_attention_data.append(attn_data)
+                    except Exception as e:
+                        print(f"⚠️ Error processing attention: {str(e)}")
 
-                    print(f"🔍 Attention stats (mean/max): {avg_attn.mean().item():.4f}, {avg_attn.max().item():.4f}")
-
-                # Prepare for next step
+                # Prepare next step
                 timeline = th.cat([timeline[1:], th.tensor([token_id], device=device)])
                 current_step += 1
 
-                # Stop if EOS or max steps
+                # Stop conditions
                 if token_id in vocab.encode(stoi) or current_step >= 1000:
-                    print("⏹️ Generation complete.")
+                    print("⏹️ Generation complete")
                     break
 
     finally:
-        # Restore original setting
+        # Restore original settings
         if hasattr(model, 'return_attention'):
             model.return_attention = original_setting
-        
+
+        # Save results (ensure all data is JSON-serializable)
         if save_timeline:
             out_path = f"{results_dir}/attention_scores_{test_name}{suffix}.json"
-            with open(out_path, 'w') as f:
-                json.dump({
-                    "metadata": {
-                        "test_name": test_name,
-                        "device": str(device),
-                        "steps_generated": current_step,
-                        "vocab_size": len(vocab)
-                    },
-                    "attention_data": all_attention_data
-                }, f, indent=2)
-            print(f"💾 Saved attention data to: {out_path}")
+            try:
+                with open(out_path, 'w') as f:
+                    json.dump({
+                        "metadata": {
+                            "test_name": str(test_name),  # Ensure string
+                            "device": str(device),
+                            "steps_generated": int(current_step),
+                            "vocab_size": int(len(vocab))
+                        },
+                        "attention_data": all_attention_data
+                    }, f, indent=2)
+                print(f"💾 Saved to {out_path}")
+            except TypeError as e:
+                print(f"❌ Failed to save: {str(e)}")
+                # Debug: Print problematic items
+                for i, item in enumerate(all_attention_data):
+                    try:
+                        json.dumps(item)
+                    except TypeError:
+                        print(f"Non-serializable item at index {i}: {item}")
 
     return {
         "attention_data": all_attention_data,
         "metadata": {
-            "test_name": test_name,
-            "steps_generated": current_step,
+            "test_name": str(test_name),
+            "steps_generated": int(current_step),
             "device": str(device)
         }
     }
