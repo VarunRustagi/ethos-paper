@@ -260,131 +260,143 @@ def profile_inference(loader, args, num_gpus: int = 8, save_timeline: bool = Tru
     print("\n✅ **Profiling Completed!**\n")
     return JSONResponse(content=results)
 
-def model_weights(loader, args, num_gpus: int = 8):
-    """Analyze and profile model weights during inference.
-
-    Args:
-        loader: Data loader containing timelines and ground truth
-        args: Tuple containing (model, device, vocab, stoi, results_dir, test_name, suffix, no_compile)
-        num_gpus: Number of available GPUs
-    """
+def model_weights(loader, args, num_gpus: int = 8, save_timeline: bool = True):
     model, device, vocab, stoi, results_dir, test_name, suffix, no_compile = args
 
-    print("\n🔍 **Starting Model Weights Analysis...**")
+    print("\n🚀 **Starting Profiling with Attention Weights...**")
     proc_name, proc_num = get_process_info()
     model.to(device)
-
+    
     if not no_compile:
         model = th.compile(model)
 
-    # Model architecture and parameter stats
-    print("\n **Model Architecture:**")
-    print(model)
-    print(f"\n⚙️  Device: {device}")
+    dataset = loader.dataset.dataset
+    context_len = dataset.context_len
+    timeline_len = dataset.timeline_len
+    max_timeline_size = context_len + timeline_len
+    time_limit = 30 / 365.25 if test_name == Test.READMISSION else 2
+    toi = th.tensor(vocab.encode(stoi), device=device, dtype=th.long)
 
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    # Prepare for attention weights collection
+    attention_weights = []
+    
+    # Hook function to capture attention weights
+    def attention_hook(module, input, output):
+        # Assuming output is a tuple where attention weights are the second element
+        if isinstance(output, tuple) and len(output) >= 2:
+            attention_weights.append(output[1].detach().cpu().numpy())
+    
+    # Register hooks on all attention layers
+    hooks = []
+    for name, module in model.named_modules():
+        if 'attention' in name.lower() or isinstance(module, th.nn.MultiheadAttention):
+            hooks.append(module.register_forward_hook(attention_hook))
 
-    print(f"\n **Parameter Count:**")
-    print(f"- Total parameters: {total_params:,}")
-    print(f"- Trainable parameters: {trainable_params:,}")
-    print(f"- Non-trainable parameters: {total_params - trainable_params:,}")
-
-    # Weight statistics
-    weight_stats = {
-        'layer_stats': {},
-        'total_params': total_params,
-        'trainable_params': trainable_params
-    }
-
-    print("\n **Layer-wise Weight Analysis:**")
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            layer_stats = {
-                'shape': list(param.shape),
-                'mean': th.mean(param.data).item(),
-                'std': th.std(param.data).item(),
-                'min': th.min(param.data).item(),
-                'max': th.max(param.data).item(),
-                'numel': param.numel(),
-                'dtype': str(param.dtype)
-            }
-
-            weight_stats['layer_stats'][name] = layer_stats
-
-            print(f"\n🔹 Layer: {name}")
-            print(f"   - Shape: {layer_stats['shape']}")
-            print(f"   - Parameters: {layer_stats['numel']:,}")
-            print(f"   - Mean: {layer_stats['mean']:.6f}")
-            print(f"   - Std: {layer_stats['std']:.6f}")
-            print(f"   - Range: [{layer_stats['min']:.6f}, {layer_stats['max']:.6f}]")
-            print(f"   - Dtype: {layer_stats['dtype']}")
-
-    param_size = total_params * 4 / (1024 ** 2)
-    print(f"\n **Memory Usage:**")
-    print(f"- Estimated size: {param_size:.2f} MB (float32)")
-
-    print("\n **Running Sample Inference to Observe Weight Behavior...**")
     try:
-        sample_timeline, _ = next(iter(loader))
-        sample_timeline = sample_timeline.to(device)
-        input_token_ids = sample_timeline.tolist()
-        input_tokens = vocab.decode(sample_timeline)
+        # Rest of your existing setup code...
+        num_params = sum(p.numel() for p in model.parameters())
+        param_size_mb = (num_params * 4) / (1024 * 1024)
+        flops = num_params * 2
 
-        print("\n **Full Input Token Timeline:**")
-        print(f"- Token IDs: {input_token_ids}")
-        print(f"- Decoded Input Tokens:\n{input_tokens}")
+        total_tokens = 0
+        total_time = 0
+        total_model_time = 0
+        total_calls = 0
 
-        print("\n **Weight Gradients Before Forward Pass:**")
-        for name, param in model.named_parameters():
-            if param.grad is not None:
-                print(f"{name}: grad exists (norm: {th.norm(param.grad):.4f})")
+        timeline_output = []
+        token_attention_weights = []  # To store attention weights per token
+
+        overall_start_time = time.time()
+        total_input_tokens = sum(len(timeline) for timeline, _ in loader)
+
+        for timeline, _ in tqdm(loader, desc="Profiling", total=len(loader), position=proc_num):
+            timeline = timeline.to(device)
+            
+            if len(timeline) > 1000:
+                timeline = timeline[:1000]
             else:
-                print(f"{name}: no gradient")
+                padding = th.zeros(1000 - len(timeline), dtype=timeline.dtype, device=device)
+                timeline = th.cat((timeline, padding))
 
-        with th.no_grad():
-            last_token, probs = model.get_next_token(sample_timeline[None, ...], return_probs=True)
+            gen_token_num = 0
+            offset = 0
+            
+            while True:
+                # Clear attention weights before each generation step
+                attention_weights.clear()
+                
+                start_time = time.time()
+                model_start_time = time.time()
+                
+                last_token, probs = model.get_next_token(timeline[None, ...], return_probs=True)
+                
+                # Store attention weights for this token generation
+                if attention_weights:
+                    token_attention_weights.append({
+                        'token': vocab.decode(last_token.item()),
+                        'step': total_tokens,
+                        'attention_weights': attention_weights.copy()
+                    })
 
-        print("\n🧮 **Weight Gradients After Forward Pass (Inference Mode):**")
-        for name, param in model.named_parameters():
-            if param.grad is not None:
-                print(f"{name}: grad exists (norm: {th.norm(param.grad):.4f})")
-            else:
-                print(f"{name}: no gradient (inference only)")
+                model_time = time.time() - model_start_time
+                elapsed_time = time.time() - start_time
+                
+                # Rest of your existing timing and logging code...
+                total_model_time += model_time
+                total_time += elapsed_time
+                total_calls += 1
+                total_tokens += 1
+                
+                timeline_output.append(vocab.decode(last_token.item()))
 
-        generated_token_id = last_token.item()
-        generated_token = vocab.decode(generated_token_id)
-        new_token_ids = input_token_ids + [generated_token_id]
-        new_decoded = vocab.decode(th.tensor(new_token_ids).to(device))
+                if not offset and len(timeline) == max_timeline_size:
+                    offset = 1
 
-        print(f"\n🟢 **Generated Token:**")
-        print(f"   - ID: {generated_token_id}")
-        print(f"   - Token: '{generated_token}'")
+                timeline = th.cat((timeline[:context_len], timeline[context_len + offset :], last_token.view(-1)),)
+                gen_token_num += 1
 
-        print(f"\n📈 **Updated Token Timeline:**")
-        print(f"- New Token IDs: {new_token_ids}")
-        print(f"- New Decoded Tokens:\n{new_decoded}")
-
-        # Top-k prediction details
-        topk = 5
-        top_probs, top_indices = th.topk(probs[0, -1], k=topk)
-        print(f"\n🔢 **Top {topk} Predicted Tokens:**")
-        for i in range(topk):
-            tok_id = top_indices[i].item()
-            tok_prob = top_probs[i].item()
-            tok_str = vocab.decode(tok_id)
-            print(f"  {i+1}. Token: '{tok_str}' (ID: {tok_id}, Prob: {tok_prob:.4f})")
-
-        print(f"\n📐 Output Shape: {list(probs.shape)}")
+                # Stop criterion
+                if timeline[-1] in toi:
+                    break
+                elif test_name == Test.READMISSION or gen_token_num > timeline_len:
+                    timeline_time = vocab.get_timeline_total_time(
+                        timeline[-gen_token_num:].cpu(), decode=True
+                    )
+                    if timeline_time > time_limit:
+                        break
 
     except Exception as e:
-        logger.error(f"Sample inference error: {traceback.format_exc()}")
+        logger.error(f"Inference error: {traceback.format_exc()}")
+    finally:
+        # Remove hooks when done
+        for hook in hooks:
+            hook.remove()
 
-    weights_file = results_dir / f"weight_stats_{proc_num}.json"
-    with weights_file.open("w") as f:
-        json.dump(weight_stats, f, indent=4)
-    print(f"\n✅ Saved weight statistics to {weights_file}")
+    # Rest of your existing results collection code...
+    overall_end_time = time.time()
+    full_inference_time = overall_end_time - overall_start_time
+    effective_throughput = total_tokens / full_inference_time if full_inference_time > 0 else 0
+
+    # Prepare results with attention weights
+    results = {
+        "total_tokens": total_tokens,
+        "total_inference_time": round(full_inference_time, 2),
+        "effective_throughput": round(effective_throughput, 2),
+        "average_latency": round(total_model_time / total_tokens, 4) if total_tokens > 0 else 0,
+        "parameter_size_mb": round(param_size_mb, 2),
+        "total_input_tokens": total_input_tokens,
+        "tokens_per_inference": 1000,
+        "generated_timeline": timeline_output[:20],
+        "attention_weights": token_attention_weights[:20]  # Include first 20 attention weights
+    }
+
+    if save_timeline:
+        with open("generated_timeline.json", "w") as f:
+            json.dump({
+                "timeline": timeline_output,
+                "attention_weights": token_attention_weights
+            }, f, indent=4)
 
     th.cuda.empty_cache()
-    print("\n✅ **Model Weights Analysis Completed!**\n")
-    return JSONResponse(content=weight_stats)
+    print("\n✅ **Profiling with Attention Weights Completed!**\n")
+    return JSONResponse(content=results)
