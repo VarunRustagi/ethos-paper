@@ -261,142 +261,126 @@ def profile_inference(loader, args, num_gpus: int = 8, save_timeline: bool = Tru
     return JSONResponse(content=results)
 
 def model_weights(loader, args, num_gpus: int = 8, save_timeline: bool = True):
+    """
+    Extracts and prints detailed attention weights during inference
+    
+    Args:
+        loader: Data loader
+        args: Tuple containing (model, device, vocab, stoi, results_dir, test_name, suffix, no_compile)
+        num_gpus: Number of available GPUs
+        save_timeline: Whether to save results to disk
+        
+    Returns:
+        Dictionary with attention weights and metadata
+    """
     model, device, vocab, stoi, results_dir, test_name, suffix, no_compile = args
-
-    print("\n🚀 **Starting Profiling with Attention Weights...**")
-    proc_name, proc_num = get_process_info()
-    model.to(device)
     
-    if not no_compile:
-        model = th.compile(model)
-
-    dataset = loader.dataset.dataset
-    context_len = dataset.context_len
-    timeline_len = dataset.timeline_len
-    max_timeline_size = context_len + timeline_len
-    time_limit = 30 / 365.25 if test_name == Test.READMISSION else 2
-    toi = th.tensor(vocab.encode(stoi), device=device, dtype=th.long)
-
-    # Prepare for attention weights collection
-    attention_weights = []
+    # Initialize storage
+    all_attention_data = []
+    current_step = 0
     
-    # Hook function to capture attention weights
-    def attention_hook(module, input, output):
-        # Assuming output is a tuple where attention weights are the second element
+    # Hook setup
+    def attention_hook(module, input, output, layer_name: str):
         if isinstance(output, tuple) and len(output) >= 2:
-            attention_weights.append(output[1].detach().cpu().numpy())
+            weights = output[1].detach().cpu().numpy()  # [batch, heads, q_len, k_len]
+            
+            # Print detailed attention information
+            print(f"\n🔍 Attention Layer: {layer_name}")
+            print(f"Shape: {weights.shape} (batch, heads, query_len, key_len)")
+            
+            for head_idx in range(weights.shape[1]):
+                print(f"\nHead {head_idx + 1}/{weights.shape[1]}:")
+                for q_pos in range(weights.shape[2]):
+                    for k_pos in range(weights.shape[3]):
+                        print(f"  Query[{q_pos}] -> Key[{k_pos}]: {weights[0, head_idx, q_pos, k_pos]:.4f}")
+            
+            return weights
     
-    # Register hooks on all attention layers
+    # Register hooks with layer names
     hooks = []
     for name, module in model.named_modules():
         if 'attention' in name.lower() or isinstance(module, th.nn.MultiheadAttention):
-            hooks.append(module.register_forward_hook(attention_hook))
-
+            hooks.append(module.register_forward_hook(
+                lambda m, i, o, name=name: attention_hook(m, i, o, name))
+            )
+    
     try:
-        # Rest of your existing setup code...
-        num_params = sum(p.numel() for p in model.parameters())
-        param_size_mb = (num_params * 4) / (1024 * 1024)
-        flops = num_params * 2
-
-        total_tokens = 0
-        total_time = 0
-        total_model_time = 0
-        total_calls = 0
-
-        timeline_output = []
-        token_attention_weights = []  # To store attention weights per token
-
-        overall_start_time = time.time()
-        total_input_tokens = sum(len(timeline) for timeline, _ in loader)
-
-        for timeline, _ in tqdm(loader, desc="Profiling", total=len(loader), position=proc_num):
+        for timeline, _ in tqdm(loader, desc="Processing Attention"):
             timeline = timeline.to(device)
             
+            # Pad/truncate to 1000 tokens (matches profile_inference)
             if len(timeline) > 1000:
                 timeline = timeline[:1000]
+                print(f"⚠️ Timeline truncated to 1000 tokens")
             else:
                 padding = th.zeros(1000 - len(timeline), dtype=timeline.dtype, device=device)
                 timeline = th.cat((timeline, padding))
-
-            gen_token_num = 0
-            offset = 0
+            
+            input_tokens = [vocab.decode(tid.item()) for tid in timeline if tid != 0]
+            print(f"\n\n=== New Timeline ===")
+            print(f"Input Tokens: {input_tokens}")
             
             while True:
-                # Clear attention weights before each generation step
-                attention_weights.clear()
+                print(f"\n🚀 Generation Step {current_step}")
+                print("-" * 50)
                 
-                start_time = time.time()
-                model_start_time = time.time()
+                with th.no_grad():
+                    output = model.get_next_token(timeline.unsqueeze(0))
+                    if isinstance(output, tuple):
+                        output_token_id = output[0].item()
+                    else:
+                        output_token_id = output.item()
+                    
+                    output_token = vocab.decode(output_token_id)
+                    print(f"Generated Token: '{output_token}' (ID: {output_token_id})")
                 
-                last_token, probs = model.get_next_token(timeline[None, ...], return_probs=True)
+                # Store complete data
+                all_attention_data.append({
+                    "step": current_step,
+                    "input_tokens": input_tokens,
+                    "output_token": output_token,
+                    "output_token_id": output_token_id
+                })
                 
-                # Store attention weights for this token generation
-                if attention_weights:
-                    token_attention_weights.append({
-                        'token': vocab.decode(last_token.item()),
-                        'step': total_tokens,
-                        'attention_weights': attention_weights.copy()
-                    })
-
-                model_time = time.time() - model_start_time
-                elapsed_time = time.time() - start_time
+                # Update for next step
+                timeline = th.cat([timeline[1:], th.tensor([output_token_id], device=device)])
+                input_tokens = input_tokens[1:] + [output_token]
+                current_step += 1
                 
-                # Rest of your existing timing and logging code...
-                total_model_time += model_time
-                total_time += elapsed_time
-                total_calls += 1
-                total_tokens += 1
-                
-                timeline_output.append(vocab.decode(last_token.item()))
-
-                if not offset and len(timeline) == max_timeline_size:
-                    offset = 1
-
-                timeline = th.cat((timeline[:context_len], timeline[context_len + offset :], last_token.view(-1)),)
-                gen_token_num += 1
-
-                # Stop criterion
-                if timeline[-1] in toi:
+                # Break conditions
+                if output_token_id in vocab.encode(stoi):
+                    print(f"⏹️ Stop token generated: '{output_token}'")
                     break
-                elif test_name == Test.READMISSION or gen_token_num > timeline_len:
-                    timeline_time = vocab.get_timeline_total_time(
-                        timeline[-gen_token_num:].cpu(), decode=True
-                    )
-                    if timeline_time > time_limit:
-                        break
-
-    except Exception as e:
-        logger.error(f"Inference error: {traceback.format_exc()}")
+                if current_step >= 1000:
+                    print("⏹️ Reached maximum generation steps (1000)")
+                    break
+    
     finally:
-        # Remove hooks when done
+        # Cleanup
         for hook in hooks:
             hook.remove()
-
-    # Rest of your existing results collection code...
-    overall_end_time = time.time()
-    full_inference_time = overall_end_time - overall_start_time
-    effective_throughput = total_tokens / full_inference_time if full_inference_time > 0 else 0
-
-    # Prepare results with attention weights
-    results = {
-        "total_tokens": total_tokens,
-        "total_inference_time": round(full_inference_time, 2),
-        "effective_throughput": round(effective_throughput, 2),
-        "average_latency": round(total_model_time / total_tokens, 4) if total_tokens > 0 else 0,
-        "parameter_size_mb": round(param_size_mb, 2),
-        "total_input_tokens": total_input_tokens,
-        "tokens_per_inference": 1000,
-        "generated_timeline": timeline_output[:20],
-        "attention_weights": token_attention_weights[:20]  # Include first 20 attention weights
+        th.cuda.empty_cache()
+        
+        # Save results if requested
+        if save_timeline:
+            output_path = f"{results_dir}/attention_weights_{test_name}{suffix}.json"
+            with open(output_path, 'w') as f:
+                json.dump({
+                    "metadata": {
+                        "test_name": test_name,
+                        "steps_generated": current_step,
+                        "device": device,
+                        "vocab_size": len(vocab)
+                    },
+                    "attention_data": all_attention_data
+                }, f, indent=2)
+            print(f"\n💾 Saved detailed attention data to {output_path}")
+    
+    return {
+        "attention_data": all_attention_data,
+        "metadata": {
+            "test_name": test_name,
+            "steps_generated": current_step,
+            "device": device
+        }
     }
-
-    if save_timeline:
-        with open("generated_timeline.json", "w") as f:
-            json.dump({
-                "timeline": timeline_output,
-                "attention_weights": token_attention_weights
-            }, f, indent=4)
-
-    th.cuda.empty_cache()
-    print("\n✅ **Profiling with Attention Weights Completed!**\n")
-    return JSONResponse(content=results)
