@@ -69,7 +69,6 @@ class CausalSelfAttention(nn.Module):
                 dropout_p=self.dropout if self.training else 0,
                 is_causal=True,
             )
-            att = None
         else:
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
             att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
@@ -83,7 +82,7 @@ class CausalSelfAttention(nn.Module):
 
         # output projection
         y = self.resid_dropout(self.c_proj(y))
-        return y, att
+        return y
 
 
 class MLP(nn.Module):
@@ -111,10 +110,9 @@ class Block(nn.Module):
         self.mlp = MLP(config)
 
     def forward(self, x):
-        attn_output, attn_weights = self.attn(self.ln_1(x))
-        x = x + attn_output
+        x = x + self.attn(self.ln_1(x))
         x = x + self.mlp(self.ln_2(x))
-        return x , attn_weights
+        return x
 
 
 @dataclass
@@ -204,11 +202,8 @@ class Ethos(nn.Module):
         tok_emb = self.transformer.wte(idx)  # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos)  # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
-        attentions = []
         for block in self.transformer.h:
-            x, attn = block(x)
-            attentions.append(attn)
-
+            x = block(x)
         x = self.transformer.ln_f(x)
 
         if targets is not None:
@@ -228,7 +223,7 @@ class Ethos(nn.Module):
             logits = self.lm_head(x[:, [-1], :])
             loss = None
 
-        return logits, loss, attentions
+        return logits, loss
 
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
         param_dict = {pn: p for pn, p in self.named_parameters()}
