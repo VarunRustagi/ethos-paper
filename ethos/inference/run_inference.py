@@ -261,18 +261,6 @@ def profile_inference(loader, args, num_gpus: int = 8, save_timeline: bool = Tru
     return JSONResponse(content=results)
 
 def model_weights(loader, args, num_gpus: int = 8, save_timeline: bool = True):
-    """
-    Extract and print detailed attention weights during inference without modifying model code.
-    
-    Args:
-        loader: DataLoader providing input sequences
-        args: Tuple of (model, device, vocab, stoi, results_dir, test_name, suffix, no_compile)
-        num_gpus: Number of GPUs available (optional)
-        save_timeline: Save attention data to disk (optional)
-    
-    Returns:
-        Dictionary with attention weights and inference metadata
-    """
     model, device, vocab, stoi, results_dir, test_name, suffix, no_compile = args
     
     all_attention_data = []
@@ -340,14 +328,20 @@ def model_weights(loader, args, num_gpus: int = 8, save_timeline: bool = True):
                 else:
                     token_attn_map = None
 
-                all_attention_data.append({
+                # Create the structured dictionary for output
+                output_data = {
                     "step": current_step,
                     "input_tokens": input_tokens,
                     "output_token": output_token,
                     "output_token_id": token_id,
                     "attention_mapping": token_attn_map  # readable mapping
-                })
+                }
 
+                # Print the structured output
+                print(json.dumps(output_data, indent=4))
+
+                # Append to all_attention_data
+                all_attention_data.append(output_data)
 
                 # Prepare for next step
                 timeline = th.cat([timeline[1:], th.tensor([token_id], device=device)])
@@ -387,3 +381,4 @@ def model_weights(loader, args, num_gpus: int = 8, save_timeline: bool = True):
             "device": str(device)
         }
     }
+
