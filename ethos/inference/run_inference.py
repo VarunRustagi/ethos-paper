@@ -369,7 +369,7 @@ def model_weights(loader, args, num_gpus: int = 8, save_timeline: bool = True):
                     "metadata": {
                         "test_name": test_name,
                         "steps_generated": current_step,
-                        "device": device,
+                        "device": str(device),
                         "vocab_size": len(vocab)
                     },
                     "attention_data": all_attention_data
