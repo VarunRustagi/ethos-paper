@@ -262,125 +262,128 @@ def profile_inference(loader, args, num_gpus: int = 8, save_timeline: bool = Tru
 
 def model_weights(loader, args, num_gpus: int = 8, save_timeline: bool = True):
     """
-    Extracts and prints detailed attention weights during inference
+    Extract and print detailed attention weights during inference without modifying model code.
     
     Args:
-        loader: Data loader
-        args: Tuple containing (model, device, vocab, stoi, results_dir, test_name, suffix, no_compile)
-        num_gpus: Number of available GPUs
-        save_timeline: Whether to save results to disk
-        
+        loader: DataLoader providing input sequences
+        args: Tuple of (model, device, vocab, stoi, results_dir, test_name, suffix, no_compile)
+        num_gpus: Number of GPUs available (optional)
+        save_timeline: Save attention data to disk (optional)
+    
     Returns:
-        Dictionary with attention weights and metadata
+        Dictionary with attention weights and inference metadata
     """
     model, device, vocab, stoi, results_dir, test_name, suffix, no_compile = args
     
-    # Initialize storage
     all_attention_data = []
     current_step = 0
+    attention_weights_log = []
+
+    # Define the hook to capture attention
+    def hook_fn(module, input, output):
+        if isinstance(output, tuple) and len(output) > 1:
+            attn_weights = output[1]  # (batch, num_heads, q_len, k_len)
+            attention_weights_log.append(attn_weights.detach().cpu())
     
-    # Hook setup
-    def attention_hook(module, input, output, layer_name: str):
-        if isinstance(output, tuple) and len(output) >= 2:
-            weights = output[1].detach().cpu().numpy()  # [batch, heads, q_len, k_len]
-            
-            # Print detailed attention information
-            print(f"\n🔍 Attention Layer: {layer_name}")
-            print(f"Shape: {weights.shape} (batch, heads, query_len, key_len)")
-            
-            for head_idx in range(weights.shape[1]):
-                print(f"\nHead {head_idx + 1}/{weights.shape[1]}:")
-                for q_pos in range(weights.shape[2]):
-                    for k_pos in range(weights.shape[3]):
-                        print(f"  Query[{q_pos}] -> Key[{k_pos}]: {weights[0, head_idx, q_pos, k_pos]:.4f}")
-            
-            return weights
-    
-    # Register hooks with layer names
+    # Register hooks
     hooks = []
     for name, module in model.named_modules():
-        if 'attention' in name.lower() or isinstance(module, th.nn.MultiheadAttention):
-            hooks.append(module.register_forward_hook(
-                lambda m, i, o, name=name: attention_hook(m, i, o, name))
-            )
-    
+        if isinstance(module, th.nn.MultiheadAttention) or 'attn' in name.lower():
+            print(f"📌 Hook registered to: {name}")
+            hooks.append(module.register_forward_hook(hook_fn))
+
     try:
-        for timeline, _ in tqdm(loader, desc="Processing Attention"):
+        for timeline, _ in tqdm(loader, desc="Extracting Attention"):
             timeline = timeline.to(device)
-            
-            # Pad/truncate to 1000 tokens (matches profile_inference)
+            attention_weights_log.clear()
+
+            # Truncate or pad timeline
             if len(timeline) > 1000:
                 timeline = timeline[:1000]
-                print(f"⚠️ Timeline truncated to 1000 tokens")
+                print("⚠️ Timeline truncated to 1000 tokens.")
             else:
-                padding = th.zeros(1000 - len(timeline), dtype=timeline.dtype, device=device)
-                timeline = th.cat((timeline, padding))
-            
-            input_tokens = [vocab.decode(tid.item()) for tid in timeline if tid != 0]
-            print(f"\n\n=== New Timeline ===")
+                pad = th.zeros(1000 - len(timeline), dtype=timeline.dtype, device=device)
+                timeline = th.cat((timeline, pad))
+
+            input_tokens = [vocab.decode(t.item()) for t in timeline if t.item() != 0]
+            print(f"\n=== New Sequence ===")
             print(f"Input Tokens: {input_tokens}")
-            
+
             while True:
-                print(f"\n🚀 Generation Step {current_step}")
+                print(f"\n🚀 Step {current_step}")
                 print("-" * 50)
-                
+
                 with th.no_grad():
                     output = model.get_next_token(timeline.unsqueeze(0))
-                    if isinstance(output, tuple):
-                        output_token_id = output[0].item()
-                    else:
-                        output_token_id = output.item()
-                    
-                    output_token = vocab.decode(output_token_id)
-                    print(f"Generated Token: '{output_token}' (ID: {output_token_id})")
-                
-                # Store complete data
+                    token_id = output[0].item() if isinstance(output, tuple) else output.item()
+                    output_token = vocab.decode(token_id)
+                    print(f"Generated Token: '{output_token}' (ID: {token_id})")
+
+                attn_tensor = attention_weights_log[-1] if attention_weights_log else None
+
+                if attn_tensor is not None:
+                    # attn_tensor shape: (batch=1, num_heads, query_len, key_len)
+                    attn_tensor = attn_tensor[0]  # Remove batch dim → (num_heads, q_len, k_len)
+
+                    # Get attention from the last query position (the newly generated token)
+                    last_q_pos = attn_tensor.shape[1] - 1
+                    last_token_attn = attn_tensor[:, last_q_pos, :]  # (num_heads, key_len)
+
+                    # Average over heads
+                    avg_attn = last_token_attn.mean(dim=0)  # (key_len,)
+
+                    # Map scores to tokens
+                    token_attn_map = {
+                        token: round(score.item(), 4)
+                        for token, score in zip(input_tokens, avg_attn)
+                    }
+                else:
+                    token_attn_map = None
+
                 all_attention_data.append({
                     "step": current_step,
                     "input_tokens": input_tokens,
                     "output_token": output_token,
-                    "output_token_id": output_token_id
+                    "output_token_id": token_id,
+                    "attention_mapping": token_attn_map  # readable mapping
                 })
-                
-                # Update for next step
-                timeline = th.cat([timeline[1:], th.tensor([output_token_id], device=device)])
+
+
+                # Prepare for next step
+                timeline = th.cat([timeline[1:], th.tensor([token_id], device=device)])
                 input_tokens = input_tokens[1:] + [output_token]
+                attention_weights_log.clear()
                 current_step += 1
-                
-                # Break conditions
-                if output_token_id in vocab.encode(stoi):
-                    print(f"⏹️ Stop token generated: '{output_token}'")
+
+                # Stop if EOS or max steps
+                if token_id in vocab.encode(stoi) or current_step >= 1000:
+                    print("⏹️ Generation complete.")
                     break
-                if current_step >= 1000:
-                    print("⏹️ Reached maximum generation steps (1000)")
-                    break
-    
+
     finally:
-        # Cleanup
         for hook in hooks:
             hook.remove()
         th.cuda.empty_cache()
-        
-        # Save results if requested
+
         if save_timeline:
-            output_path = f"{results_dir}/attention_weights_{test_name}{suffix}.json"
-            with open(output_path, 'w') as f:
+            out_path = f"{results_dir}/attention_scores_{test_name}{suffix}.json"
+            with open(out_path, 'w') as f:
                 json.dump({
                     "metadata": {
                         "test_name": test_name,
-                        "steps_generated": current_step,
                         "device": str(device),
+                        "steps_generated": current_step,
                         "vocab_size": len(vocab)
                     },
                     "attention_data": all_attention_data
                 }, f, indent=2)
-            print(f"\n💾 Saved detailed attention data to {output_path}")
-    
+            print(f"💾 Saved attention data to: {out_path}")
+
     return {
         "attention_data": all_attention_data,
         "metadata": {
             "test_name": test_name,
             "steps_generated": current_step,
-            "device": device
+            "device": str(device)
         }
     }
