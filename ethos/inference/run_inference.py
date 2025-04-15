@@ -265,28 +265,22 @@ def model_weights(loader, args, num_gpus: int = 8, save_timeline: bool = True):
     
     all_attention_data = []
     current_step = 0
-    attention_weights_log = []
 
-    # Define the hook to capture attention
-    def hook_fn(module, input, output):
-        print(f"🧲 Hook triggered on {module.__class__.__name__}")
-        if isinstance(output, tuple) and len(output) > 1:
-            attn_weights = output[1]
-            print(f"   ↪️ Attention shape: {attn_weights.shape}")
-            if attn_weights is not None:
-                attention_weights_log.append(attn_weights.detach().cpu())
-
-    # Register hooks
-    hooks = []
-    for name, module in model.named_modules():
-        if isinstance(module, th.nn.MultiheadAttention) or 'attn' in name.lower():
-            print(f"📌 Hook registered to: {name}")
-            hooks.append(module.register_forward_hook(hook_fn))
+    # Enable built-in attention tracking
+    if hasattr(model, 'return_attention'):
+        original_setting = model.return_attention
+        model.return_attention = True
+        print("✅ Enabled built-in attention tracking (return_attention=True)")
+    else:
+        raise RuntimeError("Model does not support return_attention - cannot capture attention weights.")
 
     try:
         for timeline, _ in tqdm(loader, desc="Extracting Attention"):
             timeline = timeline.to(device)
-            attention_weights_log.clear()
+
+            # Clear previous attention weights
+            if hasattr(model, 'attention_weights'):
+                model.attention_weights.clear()
 
             # Truncate or pad timeline
             if len(timeline) > 1000:
@@ -305,27 +299,26 @@ def model_weights(loader, args, num_gpus: int = 8, save_timeline: bool = True):
                     output = model.get_next_token(timeline.unsqueeze(0))
                     token_id = output[0].item() if isinstance(output, tuple) else output.item()
 
-                attn_tensor = attention_weights_log[-1] 
-                if attention_weights_log:
-                    print(f"📏 Logged attention tensors: {len(attention_weights_log)}")
-                else:
-                    None
+                # Extract attention from built-in storage
+                if hasattr(model, 'attention_weights') and model.attention_weights:
+                    # Last layer's attention (assuming batch=1)
+                    attn_weights = model.attention_weights[-1][0]  # Shape: [num_heads, q_len, k_len]
+                    
+                    # Get attention for the newly generated token (last query position)
+                    last_q_pos = attn_weights.shape[1] - 1
+                    last_token_attn = attn_weights[:, last_q_pos, :]  # [num_heads, k_len]
+                    
+                    # Average across heads
+                    avg_attn = last_token_attn.mean(dim=0)  # [k_len]
+                    
+                    # Store for analysis
+                    all_attention_data.append({
+                        "step": current_step,
+                        "token_id": token_id,
+                        "attention": avg_attn.cpu().tolist()
+                    })
 
-                if attn_tensor is not None:
-                    # attn_tensor shape: (batch=1, num_heads, query_len, key_len)
-                    attn_tensor = attn_tensor[0]  # Remove batch dim → (num_heads, q_len, k_len)
-
-                    # Get attention from the last query position (the newly generated token)
-                    last_q_pos = attn_tensor.shape[1] - 1
-                    last_token_attn = attn_tensor[:, last_q_pos, :]  # (num_heads, key_len)
-
-                    # Average over heads
-                    avg_attn = last_token_attn.mean(dim=0)  # (key_len,)
-
-                    # Print attention scores
-                    print("Attention Scores: ")
-                    for idx, score in enumerate(avg_attn):
-                        print(f"Token {idx}: Attention Score = {score.item():.4f}")
+                    print(f"🔍 Attention stats (mean/max): {avg_attn.mean().item():.4f}, {avg_attn.max().item():.4f}")
 
                 # Prepare for next step
                 timeline = th.cat([timeline[1:], th.tensor([token_id], device=device)])
@@ -337,10 +330,10 @@ def model_weights(loader, args, num_gpus: int = 8, save_timeline: bool = True):
                     break
 
     finally:
-        for hook in hooks:
-            hook.remove()
-        th.cuda.empty_cache()
-
+        # Restore original setting
+        if hasattr(model, 'return_attention'):
+            model.return_attention = original_setting
+        
         if save_timeline:
             out_path = f"{results_dir}/attention_scores_{test_name}{suffix}.json"
             with open(out_path, 'w') as f:
