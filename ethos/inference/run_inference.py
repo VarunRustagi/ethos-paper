@@ -272,7 +272,7 @@ def model_weights(loader, args, num_gpus: int = 8, save_timeline: bool = True):
         if isinstance(output, tuple) and len(output) > 1:
             attn_weights = output[1]  # (batch, num_heads, q_len, k_len)
             attention_weights_log.append(attn_weights.detach().cpu())
-    
+
     # Register hooks
     hooks = []
     for name, module in model.named_modules():
@@ -293,10 +293,7 @@ def model_weights(loader, args, num_gpus: int = 8, save_timeline: bool = True):
                 pad = th.zeros(1000 - len(timeline), dtype=timeline.dtype, device=device)
                 timeline = th.cat((timeline, pad))
 
-            input_tokens = [vocab.decode(t.item()) for t in timeline if t.item() != 0]
-            print(f"\n=== New Sequence ===")
-            print(f"Input Tokens: {input_tokens}")
-
+            # Process timeline for attention extraction
             while True:
                 print(f"\n🚀 Step {current_step}")
                 print("-" * 50)
@@ -304,8 +301,6 @@ def model_weights(loader, args, num_gpus: int = 8, save_timeline: bool = True):
                 with th.no_grad():
                     output = model.get_next_token(timeline.unsqueeze(0))
                     token_id = output[0].item() if isinstance(output, tuple) else output.item()
-                    output_token = vocab.decode(token_id)
-                    print(f"Generated Token: '{output_token}' (ID: {token_id})")
 
                 attn_tensor = attention_weights_log[-1] if attention_weights_log else None
 
@@ -320,33 +315,13 @@ def model_weights(loader, args, num_gpus: int = 8, save_timeline: bool = True):
                     # Average over heads
                     avg_attn = last_token_attn.mean(dim=0)  # (key_len,)
 
-                    # Map scores to tokens
-                    token_attn_map = {
-                        token: round(score.item(), 4)
-                        for token, score in zip(input_tokens, avg_attn)
-                    }
-                else:
-                    token_attn_map = None
-
-                # Create the structured dictionary for output
-                output_data = {
-                    "step": current_step,
-                    "input_tokens": input_tokens,
-                    "output_token": output_token,
-                    "output_token_id": token_id,
-                    "attention_mapping": token_attn_map  # readable mapping
-                }
-
-                # Print the structured output
-                print(json.dumps(output_data, indent=4))
-
-                # Append to all_attention_data
-                all_attention_data.append(output_data)
+                    # Print attention scores
+                    print("Attention Scores: ")
+                    for idx, score in enumerate(avg_attn):
+                        print(f"Token {idx}: Attention Score = {score.item():.4f}")
 
                 # Prepare for next step
                 timeline = th.cat([timeline[1:], th.tensor([token_id], device=device)])
-                input_tokens = input_tokens[1:] + [output_token]
-                attention_weights_log.clear()
                 current_step += 1
 
                 # Stop if EOS or max steps
@@ -381,4 +356,3 @@ def model_weights(loader, args, num_gpus: int = 8, save_timeline: bool = True):
             "device": str(device)
         }
     }
-
