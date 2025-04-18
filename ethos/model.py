@@ -49,6 +49,7 @@ class CausalSelfAttention(nn.Module):
             )
         self.attention_weights = attention_weights
 
+
     def forward(self, x):
         B, T, C = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
 
@@ -109,11 +110,13 @@ class Block(nn.Module):
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
-    def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
+    def forward(self, x, return_attention=False):
+        attn_output = self.attn(self.ln_1(x))
+        if return_attention:
+            return x + attn_output, self.attn.attention_weights[-1]  # Return both output and weights
+        x = x + attn_output
         x = x + self.mlp(self.ln_2(x))
         return x
-
 
 @dataclass
 class ModelConfig:
@@ -187,27 +190,30 @@ class Ethos(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None, context_length=0):
+    def forward(self, idx, targets=None, context_length=0, return_attention=False):
         device = idx.device
         b, t = idx.size()
         assert (
             t <= self.config.block_size
         ), f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
-        pos = torch.arange(0, t, dtype=torch.long, device=device)  # shape (t)
+        pos = torch.arange(0, t, dtype=torch.long, device=device)
 
-        if self.return_attention:
-            self.attention_weights.clear()
-
-
-        tok_emb = self.transformer.wte(idx)  # token embeddings of shape (b, t, n_embd)
-        pos_emb = self.transformer.wpe(pos)  # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx)  # (b, t, n_embd)
+        pos_emb = self.transformer.wpe(pos)  # (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
+
+        all_attention_weights = [] if return_attention else None
+
         for block in self.transformer.h:
-            x = block(x)
+            if return_attention:
+                x, attn_weights = block(x, return_attention=True)
+                all_attention_weights.append(attn_weights)
+            else:
+                x = block(x)
+
         x = self.transformer.ln_f(x)
 
         if targets is not None:
-            # if we are given some desired targets also calculate the loss
             logits = self.lm_head(x)
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)),
@@ -217,13 +223,19 @@ class Ethos(nn.Module):
             )
             if context_length:
                 loss.view(logits.size()[:2])[:, :context_length] = 0
-
             loss = loss.mean()
         else:
             logits = self.lm_head(x[:, [-1], :])
             loss = None
 
-        return logits, loss
+        if return_attention:
+            # Optionally print attention weights for debugging
+            for layer_idx, weights in enumerate(all_attention_weights):
+                print(f"Layer {layer_idx} attention shape: {weights.shape}")  # (b, heads, t, t)
+            return logits, loss, all_attention_weights
+        else:
+            return logits, loss
+
 
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
         param_dict = {pn: p for pn, p in self.named_parameters()}
@@ -284,16 +296,27 @@ class Ethos(nn.Module):
         return idx
 
     @torch.no_grad()
-    def get_next_token(self, tokens, return_probs=False, top_k=None):
+    def get_next_token(self, tokens, return_probs=False, top_k=None, return_attention=False):
         if tokens.size(1) > self.config.block_size:
             tokens = tokens[:, -self.config.block_size :]
-        logits, _ = self(tokens)
-        logits = logits[:, -1, :]
+        
+        # Pass the tokens through the model's forward pass with return_attention flag
+        logits, _, attn_weights = self(tokens, return_attention=return_attention)  # Modify forward to return attn_weights
+        
+        logits = logits[:, -1, :]  # Get logits of last token
         if top_k is not None:
             v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
             logits[logits < v[:, [-1]]] = -float("Inf")
+        
         probs = F.softmax(logits, dim=-1)
         next_token = torch.multinomial(probs, num_samples=1)
+        
+        if return_attention:
+            # Print or log attention weights (this is where you can inspect them)
+            for layer_idx, weights in enumerate(attn_weights):
+                print(f"Layer {layer_idx} attention shape: {weights.shape}")  # Example of printed shape (b, heads, t, t)
+        
         if return_probs:
             return next_token, probs
         return next_token
+

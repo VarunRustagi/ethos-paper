@@ -8,12 +8,16 @@ import psutil
 import numpy as np
 import os
 from fastapi.responses import JSONResponse
-
+from ethos.model import Ethos, ModelConfig
 import torch as th
 from tqdm import tqdm
 
 from .constants import Test
 
+# Initialization
+config = ModelConfig()
+model = Ethos(config, return_attention=True)
+model.eval()
 
 def get_process_info():
     proc_name = mp.current_process().name
@@ -53,12 +57,14 @@ def run_inference(loader, args, num_gpus: int = 8):
         offset = 0
         while True:
             if test_name == Test.SOFA_PREDICTION and gen_token_num == 1:
-                # append a sofa token to the timeline and continue generating
                 last_token = th.tensor(
                     vocab.encode(["SOFA"]), device=timeline.device, dtype=th.long
                 )
             else:
-                last_token, probs = model.get_next_token(timeline[None, ...], return_probs=True)
+                # Assuming model.get_next_token() returns attention weights as well
+                last_token, probs, attn_weights = model.get_next_token(
+                    timeline[None, ...], return_probs=True, return_attention=True
+                )
 
             if not offset and len(timeline) == max_timeline_size:
                 offset = 1
@@ -67,7 +73,8 @@ def run_inference(loader, args, num_gpus: int = 8):
                 (timeline[:context_len], timeline[context_len + offset :], last_token.view(-1)),
             )
             gen_token_num += 1
-            # stop criterion
+
+            # Stop criterion
             if timeline[-1] in toi:
                 stop_reason = "token_of_interest"
                 break
@@ -79,14 +86,13 @@ def run_inference(loader, args, num_gpus: int = 8):
                     stop_reason = "time_limit"
                     break
             elif test_name == Test.SOFA_PREDICTION and gen_token_num == 3:
-                # if there are 3 tokens generated and none of them is a toi,
-                # then sofa experiment failed as the 3rd token should always be a quantile
                 stop_reason = "sofa_fail"
                 break
             elif test_name == Test.DRG_PREDICTION:
                 stop_reason = "drg_fail"
                 break
 
+        # Gather the results
         expected = ground_truth.pop("expected")
         if test_name in (
             Test.ADMISSION_MORTALITY,
@@ -101,6 +107,7 @@ def run_inference(loader, args, num_gpus: int = 8):
         toi_probs = dict(zip(stoi, probs[0][toi].tolist()))
         timeline_time = vocab.get_timeline_total_time(timeline[-gen_token_num:].cpu(), decode=True)
 
+        # Log attention weights along with other results
         results.append(
             {
                 "expected": expected,
@@ -111,16 +118,16 @@ def run_inference(loader, args, num_gpus: int = 8):
                 **ground_truth,
                 "token_dist": gen_token_num,
                 "token_time": timeline_time,
+                "attention_weights": attn_weights.cpu().detach().numpy()  # Log attention weights
             }
         )
 
+    # Save the results with attention weights
     res_file = results_dir / f"part_{proc_num}{f'_{suffix}' if suffix is not None else ''}"
-    
     with res_file.with_suffix(".json").open("w") as f:
         json.dump(results, f, indent=4)
 
     th.cuda.empty_cache()
-    return JSONResponse(content=results)
 
 def profile_inference(loader, args, num_gpus: int = 8, save_timeline: bool = True):
     model, device, vocab, stoi, results_dir, test_name, suffix, no_compile = args
